@@ -33,12 +33,12 @@ namespace OrmTest
             ///***Performance Test***/
             //new SqlSugarPerformance(100).Select();
 
-            ///***Demo***/
-            //OrmTest.Demo.Query.Init();
+            /***Demo***/
+            OrmTest.Demo.Query.Init();
             //OrmTest.Demo.Insert.Init();
             //OrmTest.Demo.Delete.Init();
             //OrmTest.Demo.Update.Init();
-            OrmTest.Demo.DbFirst.Init();
+            //OrmTest.Demo.DbFirst.Init();
         }
     }
 }

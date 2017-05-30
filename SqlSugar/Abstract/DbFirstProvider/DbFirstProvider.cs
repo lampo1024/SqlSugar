@@ -2,6 +2,8 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
+
 namespace SqlSugar
 {
     public abstract partial class DbFirstProvider : IDbFirst
@@ -12,20 +14,27 @@ namespace SqlSugar
         private string PropertyTemplate { get; set; }
         private string PropertyDescriptionTemplate { get; set; }
         private string ConstructorTemplate { get; set; }
-        private string NamespaceTemplate { get; set; }
+        private string UsingTemplate { get; set; }
         private string Namespace { get; set; }
         private bool IsAttribute { get; set; }
         private bool IsDefaultValue { get; set; }
+        private ISqlBuilder SqlBuilder
+        {
+            get
+            {
+                return InstanceFactory.GetSqlbuilder(this.Context.CurrentConnectionConfig);
+            }
+        }
         private List<DbTableInfo> TableInfoList { get; set; }
 
         public DbFirstProvider()
         {
-            this.ClassTemplate = DefaultTemplate.ClassTemplate;
-            this.ClassDescriptionTemplate = DefaultTemplate.ClassDescriptionTemplate;
-            this.PropertyTemplate = DefaultTemplate.PropertyTemplate;
-            this.PropertyDescriptionTemplate = DefaultTemplate.PropertyDescriptionTemplate;
-            this.ConstructorTemplate = DefaultTemplate.ConstructorTemplate;
-            this.NamespaceTemplate = DefaultTemplate.NamespaceTemplate;
+            this.ClassTemplate = DbFirstTemplate.ClassTemplate;
+            this.ClassDescriptionTemplate = DbFirstTemplate.ClassDescriptionTemplate;
+            this.PropertyTemplate = DbFirstTemplate.PropertyTemplate;
+            this.PropertyDescriptionTemplate = DbFirstTemplate.PropertyDescriptionTemplate;
+            this.ConstructorTemplate = DbFirstTemplate.ConstructorTemplate;
+            this.UsingTemplate = DbFirstTemplate.UsingTemplate;
         }
 
         public void Init()
@@ -34,14 +43,6 @@ namespace SqlSugar
             if (this.Context.DbMaintenance.GetViewInfoList().IsValuable())
             {
                 this.TableInfoList.AddRange(this.Context.DbMaintenance.GetViewInfoList());
-            }
-        }
-
-        public List<SchemaInfo> GetSchemaInfoList
-        {
-            get
-            {
-                throw new NotImplementedException();
             }
         }
 
@@ -72,7 +73,7 @@ namespace SqlSugar
 
         public IDbFirst SettingNamespaceTemplate(Func<string, string> func)
         {
-            this.NamespaceTemplate = func(this.NamespaceTemplate);
+            this.UsingTemplate = func(this.UsingTemplate);
             return this;
         }
 
@@ -122,41 +123,171 @@ namespace SqlSugar
 
         public Dictionary<string, string> ToClassStringList(string nameSpace = "Models")
         {
+            this.Namespace = nameSpace;
             Dictionary<string, string> result = new Dictionary<string, string>();
             if (this.TableInfoList.IsValuable())
             {
                 foreach (var tableInfo in this.TableInfoList)
                 {
-
+                    var columns = this.Context.DbMaintenance.GetColumnInfosByTableName(tableInfo.Name);
+                    string className = tableInfo.Name;
+                    string classText = this.ClassTemplate;
+                    string ConstructorText = IsDefaultValue ? this.ConstructorTemplate : null;
+                    if (this.Context.MappingTables.IsValuable())
+                    {
+                        var mappingInfo = this.Context.MappingTables.FirstOrDefault(it => it.DbTableName.Equals(tableInfo.Name, StringComparison.CurrentCultureIgnoreCase));
+                        if (mappingInfo.IsValuable())
+                        {
+                            className = mappingInfo.EntityName;
+                        }
+                        if (mappingInfo != null)
+                        {
+                            classText = classText.Replace(DbFirstTemplate.KeyClassName, mappingInfo.EntityName);
+                        }
+                    }
+                    classText = classText.Replace(DbFirstTemplate.KeyClassName, className);
+                    classText = classText.Replace(DbFirstTemplate.KeyNamespace, this.Namespace);
+                    classText = classText.Replace(DbFirstTemplate.KeyUsing, IsAttribute ? (this.UsingTemplate + "using " + PubConst.AssemblyName + ";\r\n") : this.UsingTemplate);
+                    classText = classText.Replace(DbFirstTemplate.KeyClassDescription, this.ClassDescriptionTemplate.Replace(DbFirstTemplate.KeyClassDescription, tableInfo.Description + "\r\n"));
+                    classText = classText.Replace(DbFirstTemplate.KeySugarTable, IsAttribute ? string.Format(DbFirstTemplate.ValueSugarTable, tableInfo.Name): null);
+                    if (columns.IsValuable())
+                    {
+                        foreach (var item in columns)
+                        {
+                            var isLast = columns.Last() == item;
+                            string PropertyText = this.PropertyTemplate;
+                            string PropertyDescriptionText = this.PropertyDescriptionTemplate;
+                            string propertyName = GetPropertyName(item);
+                            string propertyTypeName = GetPropertyTypeName(item);
+                            PropertyText = GetPropertyText(item, PropertyText);
+                            PropertyDescriptionText = GetPropertyDescriptionText(item, PropertyDescriptionText);
+                            PropertyText = PropertyDescriptionText + PropertyText;
+                            classText = classText.Replace(DbFirstTemplate.KeyPropertyName, PropertyText + (isLast ? "" : ("\r\n" + DbFirstTemplate.KeyPropertyName)));
+                            if (ConstructorText.IsValuable() && item.DefaultValue.IsValuable())
+                            {
+                                ConstructorText = ConstructorText.Replace(DbFirstTemplate.KeyPropertyName, propertyName);
+                                ConstructorText = ConstructorText.Replace(DbFirstTemplate.KeyDefaultValue, GetPropertyTypeConvert(item)) + (isLast ? "" : this.ConstructorTemplate);
+                            }
+                        }
+                    }
+                    if (!columns.Any(it => it.DefaultValue != null))
+                    {
+                        ConstructorText = null;
+                    }
+                    classText = classText.Replace(DbFirstTemplate.KeyConstructor, ConstructorText);
+                    classText = classText.Replace(DbFirstTemplate.KeyPropertyName, null);
+                    result.Add(className, classText);
                 }
             }
-            this.Namespace = nameSpace;
             return result;
         }
+
+        private string GetProertypeDefaultValue(DbColumnInfo item)
+        {
+            var result = item.DefaultValue;
+            if (result == null) return null;
+            if (Regex.IsMatch(result, @"^\(\'(.+)\'\)$"))
+            {
+                result = Regex.Match(result, @"^\(\'(.+)\'\)$").Groups[1].Value;
+            }
+            if (Regex.IsMatch(result, @"^\((.+)\)$"))
+            {
+                result = Regex.Match(result, @"^\((.+)\)$").Groups[1].Value;
+            }
+            if (result.Equals(this.SqlBuilder.SqlDateNow, StringComparison.CurrentCultureIgnoreCase))
+            {
+                result = "DateTime.Now";
+            }
+            return result;
+        }
+
         public void CreateClassFile(string directoryPath, string nameSpace = "Models")
         {
             Check.ArgumentNullException(directoryPath, "directoryPath can't null");
-            this.Namespace = nameSpace;
             var classStringList = ToClassStringList(nameSpace);
             if (classStringList.IsValuable())
             {
                 foreach (var item in classStringList)
                 {
-                    string className = item.Key;
-                    if (this.Context.MappingTables.IsValuable())
-                    {
-                        var mappingInfo = this.Context.MappingTables.FirstOrDefault(it => it.DbTableName.Equals(item.Key, StringComparison.CurrentCultureIgnoreCase));
-                        if (mappingInfo.IsValuable())
-                        {
-                            className = mappingInfo.EntityName;
-                        }
-                    }
-                    FileHeper.CreateFile(directoryPath.TrimEnd('\\').TrimEnd('/') + string.Format("{0}\\.cs", className), item.Value, Encoding.UTF8);
+                    FileHeper.CreateFile(directoryPath.TrimEnd('\\').TrimEnd('/') + string.Format("\\{0}.cs", item.Key), item.Value, Encoding.UTF8);
                 }
             }
         }
 
         #region Private methods
+        private string GetPropertyText(DbColumnInfo item, string PropertyText)
+        {
+            string SugarColumnText = DbFirstTemplate.ValueSugarCoulmn;
+            var propertyName = GetPropertyName(item);
+            var isMappingColumn = propertyName != item.DbColumnName;
+            var hasSugarColumn = item.IsPrimarykey == true || item.IsIdentity == true || isMappingColumn;
+            if (hasSugarColumn && this.IsAttribute)
+            {
+                List<string> joinList = new List<string>();
+                if (item.IsPrimarykey) {
+                    joinList.Add("IsPrimaryKey=true"); 
+                }
+                if (item.IsIdentity)
+                {
+                    joinList.Add("IsIdentity=true");
+                }
+                if (isMappingColumn) {
+                    joinList.Add("ColumnName=\""+item.DbColumnName+"\"");
+                }
+                SugarColumnText = string.Format(SugarColumnText,string.Join(",",joinList));
+            }
+            else
+            {
+                SugarColumnText = null;
+            }
+            string typeString = GetPropertyTypeName(item);
+            PropertyText = PropertyText.Replace(DbFirstTemplate.KeySugarColumn, SugarColumnText);
+            PropertyText = PropertyText.Replace(DbFirstTemplate.KeyPropertyType, typeString);
+            PropertyText = PropertyText.Replace(DbFirstTemplate.KeyPropertyName, propertyName);
+            return PropertyText;
+        }
+        private string GetEnityName(DbColumnInfo item)
+        {
+            var mappingInfo = this.Context.MappingTables.FirstOrDefault(it => it.DbTableName.Equals(item.TableName, StringComparison.CurrentCultureIgnoreCase));
+            return mappingInfo == null ? item.TableName : mappingInfo.EntityName;
+        }
+        private string GetPropertyName(DbColumnInfo item)
+        {
+            if (this.Context.MappingColumns.IsValuable())
+            {
+                var mappingInfo = this.Context.MappingColumns.SingleOrDefault(it => it.DbColumnName == item.DbColumnName && it.EntityName == GetEnityName(item));
+                return mappingInfo == null ? item.DbColumnName : mappingInfo.PropertyName;
+            }
+            else
+            {
+                return item.DbColumnName;
+            }
+        }
+
+        private string GetPropertyTypeName(DbColumnInfo item)
+        {
+            string result = this.Context.Ado.DbBind.GetCSharpType(item.DataType);
+            if (result != "string" && item.IsNullable)
+            {
+                result += "?";
+            }
+            return result;
+        }
+        private string GetPropertyTypeConvert(DbColumnInfo item)
+        {
+            var convertString = GetProertypeDefaultValue(item);
+            if (convertString == "DateTime.Now" || convertString == null) return convertString;
+            string result = this.Context.Ado.DbBind.GetCSharpConvert(item.DataType) + "(\"" + convertString + "\")";
+            return result;
+        }
+
+        private string GetPropertyDescriptionText(DbColumnInfo item, string propertyDescriptionText)
+        {
+            propertyDescriptionText = propertyDescriptionText.Replace(DbFirstTemplate.KeyPropertyDescription, item.ColumnDescription);
+            propertyDescriptionText = propertyDescriptionText.Replace(DbFirstTemplate.KeyDefaultValue, item.Value.ObjToString());
+            propertyDescriptionText = propertyDescriptionText.Replace(DbFirstTemplate.KeyIsNullable, item.IsNullable.ObjToString());
+            return propertyDescriptionText;
+        }
 
         #endregion
     }
